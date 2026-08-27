@@ -1,37 +1,58 @@
-# 9. Compare engines by objective
+# 9. Gated text-engine implementation roadmap
 
 [Previous](08-rtx-5090.md) · [Index](README.md) · [Next](10-qwen-transfer.md)
 
-This matrix describes design centers, not benchmark winners. Support changes
-quickly; verify the exact model, quant and GPU commit before choosing.
+## Why this matters
 
-| Engine/family | Design center | Batching/cache policy | Kernel/quant posture | Best comparison question |
-|---|---|---|---|---|
-| DwarfStar | narrow native DeepSeek/GLM deployments | sessions, prefix/KV checkpoints, microbatch; compressed model-specific state | C/Metal/CUDA/ROCm, specialized quant and streaming paths | Does specialization win for this exact model, hardware, context and concurrency? |
-| llama.cpp / Ollama | broad local portability; Ollama packages/serves models | slot batching and prompt cache; policy varies by frontend | GGUF and many CPU/GPU backends/quants | What is the simplest portable local baseline with the same GGUF and offload? |
-| vLLM | high-throughput accelerator serving | continuous batching, paged KV, prefix caching | framework/library kernels and broad quant ecosystem | What throughput/latency frontier appears under a realistic arrival process? |
-| SGLang | structured generation and serving runtime | continuous batching, radix/prefix-oriented reuse | optimized accelerator backends | Do prefix-heavy/agent workloads benefit at equal memory and quality? |
-| Unsloth-related runtimes/artifacts | efficient fine-tuning, conversion, and packaged inference paths | depends on selected runtime | aggressive model-specific quant artifacts | Is the artifact/runtime pair validated for this architecture and modality? |
+Each milestone produces a runnable artifact and prevents performance work from
+hiding a semantic error. Do not begin a later gate while an earlier one has
+unexplained drift.
 
-Primary design references: [llama.cpp](https://github.com/ggml-org/llama.cpp),
-[Ollama](https://github.com/ollama/ollama), [vLLM PagedAttention
-paper](https://arxiv.org/abs/2309.06180), [vLLM docs](https://docs.vllm.ai/),
-[SGLang paper](https://arxiv.org/abs/2312.07104), and
-[SGLang docs](https://docs.sglang.ai/).
+## Milestones and acceptance gates
 
-## Fair protocol
+| # | Deliverable | Input -> output | Gate |
+|---:|---|---|---|
+| 1 | pinned fixture | prompt/messages -> IDs, positions, logits | hashes and expected logits recorded |
+| 2 | inventory/converter | checkpoint shards -> validated manifest/artifact | every tensor accounted; sample round trips |
+| 3 | scalar text forward | IDs -> taps, state, logits | matches Transformers and llama.cpp |
+| 4 | dense CUDA primitives | shape/dtype/tails -> projections/norm/FFN | scalar differential suite passes |
+| 5 | one-token GDN | row + old state -> output + new state | warm-up and FP32 recurrence pass |
+| 6 | hybrid scheduler | row -> 48 GDN + 16 attention layers | layers 3/4/63 and logits pass |
+| 7 | chunked prefill | arbitrary chunks -> logits + final state | decode-equivalent final state |
+| 8 | quantized path | calibrated artifact -> logits/text | high-precision comparison and quality suite pass |
+| 9 | 32 GiB proof | artifact + 32K session -> allocation log | graphs included; reserve remains; run completes |
+| 10 | measured optimization | baseline -> fused/graphed/scheduled path | profiler attribution, correctness, raw A/B data |
+| 11 | persistence | arbitrary prefix -> saved/restored/forked sessions | all hybrid state continues identically |
+| 12 | extensions | text core -> MTP, then vision boundary | Chapter 10 gates pass separately |
 
-Pin engine/model/tokenizer/template/quant commits. Match context, max output,
-sampling and stop rules. Include model load and steady-state separately. Fix GPU
-power/clocks where allowed. Use identical prompts and arrival traces; report
-quality parity, failed/OOM requests, TTFT/ITL distributions, aggregate tokens/s,
-and peak host/device memory. For local single-user tests use concurrency one; for
-serving, sweep concurrency. Do not compare DwarfStar batch-one decode to vLLM
-aggregate throughput or compare different quant quality as “speed.”
+Milestone 1 includes one-token and multi-token prompts and the official chat
+template. Milestone 6 tests the first attention layer and the return to GDN.
+Milestone 7 includes chunk sizes around 4 and 64. Milestone 8 compares greedy
+walks, held-out perplexity/NLL, long recurrence, and task fixtures; a short
+perplexity win cannot excuse long-state degradation. Milestone 9 repeats at
+larger contexts until the admitted maximum is established.
 
-## Check
+## Stable interfaces
 
-Choose an engine for (a) a laptop offline chat, (b) eight-GPU multi-tenant API,
-and (c) hacking one DeepSeek layout. Expected: portability, scheduler throughput,
-and specialization lead to different answers; no row is universally best.
+`ModelSpec` and `ModelWeights` are created once; `SequenceInput` carries
+embeddings and positions; `SessionState` contains all mutable prefix state;
+`BackendOps` supplies reference or CUDA operations. Server and CLI code see
+tokens/logits/session operations, never tensor names. This conceptual boundary
+does not require changing DwarfStar's runtime API.
+
+## DwarfStar lessons
+
+Reuse lifetimes, allocation accounting, differential tests, MMV/MMQ, graph
+discipline, benchmarking, and correctness gates. Adapt validation, binding,
+quantization, serialization, hybrid scheduling, batching, and future MTP.
+Reject compressed-attention schemas, indexers, MoE routing/streaming, mHC, and
+DSpark semantics.
+
+## Failure modes and exercise
+
+Do not optimize before a high-precision oracle, accept only final token text,
+introduce quantization and CUDA simultaneously, or call a nominal artifact size
+a fit proof. Exercise: for each gate write the exact fixture, observable output,
+tolerance, failure artifact, and rollback criterion. Expected: another engineer
+can run every gate without an oral explanation.
 

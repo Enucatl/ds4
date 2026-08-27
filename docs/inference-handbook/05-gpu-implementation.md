@@ -1,72 +1,68 @@
-# 5. GPU implementation
+# 5. Weight conversion, quantization, and 32 GiB fit
 
 [Previous](04-numerics.md) · [Index](README.md) · [Next](06-system-optimization.md)
 
-GPU speed comes from arranging dependencies, storage, and work—not translating
-each CPU loop into a kernel.
+## Why this matters
 
-## Lifetimes and allocation
+BF16 language weights alone are about 54 GB decimal. A 5090 build therefore
+requires quantization, but quantizing recurrence-sensitive tensors before the
+high-precision path passes makes errors hard to attribute.
 
-Weights live for the engine. KV and graph workspaces live for a session.
-Per-layer views and selected-expert tables are reused. Token-local activations
-should reuse preallocated buffers. `ds4_alloc_guard_begin/end` detects accidental
-host allocation inside guarded inference phases; GPU graph allocation occurs in
-session creation. Stable addresses are also prerequisites for graph replay.
+## Inventory before conversion
 
-```mermaid
-flowchart LR
-  W[engine: mapped/repacked weights] --> K[kernel]
-  S[session: KV + compressor state] --> K
-  P[session: persistent scratch] --> K
-  K --> P
-  K --> S
-  P --> L[logits]
-```
+Emit one manifest row per checkpoint tensor: canonical role, source name, shape,
+dtype, elements, source bytes, destination format/block size, payload bytes,
+alignment, checksum, and transpose/repack. Reject missing, duplicate, extra
+mandatory, or shape-incompatible tensors. The manifest, not filename folklore,
+is the input to `ModelSpec` validation.
 
-## Decode versus prefill dispatch
+For block format `(N values, B bytes)`, storage is
+`ceil(elements/N)*B`, rounded for tensor alignment. Record device copies and
+derived layouts separately. Conversion must round-trip a sample block through a
+scalar dequantizer and compare each converted tensor's checksum.
 
-MMVQ means quantized matrix-vector work: decode-friendly, low row count, often
-bandwidth/launch limited. MMQ means quantized matrix-matrix work: prefill or a
-multi-session batch, with weight reuse and Tensor Core opportunities. The
-vendored definitions live under `cuda/mmq/`; `cuda_use_mmq` and
-`cuda_use_mxfp4_mmq` gate the paths. MXFP4 has no generic dequant+cuBLAS fallback
-in this code, so MMQ availability is a correctness requirement for its CUDA
-prefill path.
+## Quantization policy
 
-Fallbacks matter:
+Bring up BF16/FP16 weights with FP32 sensitive state first. Then calibrate on a
+representative corpus and change one tensor class at a time. A reasonable
+**Proposed** order is FFN gate/up, FFN down, mixer projections, embeddings/LM
+head, and finally recurrence-sensitive GDN paths only if evidence permits.
+Keep norms, biases, `A_log`, `dt_bias`, and recurrent state high precision at v1.
+q27's published per-tensor recipes are useful external evidence that sensitivity
+is non-uniform, not proof that its choices transfer to this converter.
 
-- optional fused QKV/KV-store/attention wrappers return unavailable and the
-  graph composes established operations;
-- Q8/F16 dense work may dequantize then call cuBLAS;
-- MXFP4 routes through vendored MMVQ/MMQ; unsupported layout fails explicitly;
-- CPU is a diagnostic reference, not a silent GPU serving fallback.
+## Reproducible memory ledger
 
-## Kernel reasoning
+| Allocation | Formula / source | 32K scenario |
+|---|---|---:|
+| quantized resident weights | converter manifest | measured at load |
+| repacked/derived weights | runtime allocation log | measured at load |
+| GDN recurrent matrices | `48*48*128*128*4` | 144 MiB/session |
+| GDN convolution rings | `48*10240*4*4` | 7.5 MiB/session |
+| full-attention BF16 KV | `65536*context` | 2 GiB/session |
+| logits | `248320*4` | 0.95 MiB/session |
+| activation/workspace | maximum live plan | measured |
+| CUDA libraries + graphs | allocation delta | measured |
+| fragmentation/reserve | explicit policy | never zero |
 
-Coalesce adjacent lanes across contiguous quant blocks or output columns. Tile
-to reuse activations and weight scales. Shared memory saves global reads but can
-reduce resident blocks; registers save instructions but spilling is disastrous.
-Occupancy is a constraint, not a goal: a lower-occupancy kernel with greater
-reuse can win. Inspect registers, shared bytes, achieved occupancy, memory
-transactions, and warp stalls together.
+The 4-bit arithmetic lower bound is `27e9*0.5 = 13.5 GB` decimal (12.6 GiB),
+not an artifact size or fit proof. The allocation log must show current, peak,
+and reserved bytes by owner and demonstrate headroom after graph instantiation.
+At native 256K, BF16 KV alone is 16 GiB, so a 32K fit does not prove native
+context fit. Larger context requires a measured lower-precision KV policy or a
+smaller weight/workspace plan and its own quality gate.
 
-Fusion removes intermediate traffic and launches, but lengthens live ranges and
-couples shape assumptions. Preserve an unfused differential oracle until the
-fused path is proven at short, boundary, and long contexts.
+## DwarfStar transfer boundary
 
-## CUDA Graphs
+Reuse exact-name binding, block-size arithmetic, calibration, and allocation
+guards. Adapt the quant policy to dense Qwen tensors. Reject routed-expert
+formats and SSD expert streaming: every dense FFN weight is used every token.
 
-`ds4_gpu_decode_graph_begin/end` caches decode “islands” by a 48-byte key and
-replays them at stable addresses. Separate explicit graphs cover split attention
-and routed-MoE paths. Graphs reduce CPU launch overhead; they do not reduce
-weight bytes or make dynamic expert identities static. Cache keys and invalidation
-must include every shape/address-affecting condition. See [`CUDA graph capture`](https://github.com/antirez/ds4/blob/c1d4597a80e300b803dc642519718f2c999589da/ds4_cuda.cu#L839).
+## Failures and exercise
 
-## Check and experiment
-
-Profile one-token decode and 256-token prefill. Expected: decode shows many
-small/bandwidth-sensitive launches; prefill moves toward GEMM utilization. Sweep
-block size for one quant dot kernel. Expected: performance is non-monotonic as
-register/shared pressure trades against occupancy and reuse. Confirm output
-against the scalar test at every point.
+Do not omit alignment/scales, count mmap file bytes as VRAM, overwrite the only
+high-precision oracle, or claim quality from perplexity alone. Exercise: fill
+the ledger from an actual artifact and context 32K. Expected: logged allocation
+totals reproduce the sum within allocator accounting, the process completes a
+fixture, and free reserve remains after graphs; otherwise the fit gate fails.
 

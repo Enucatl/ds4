@@ -1,45 +1,59 @@
-# DwarfStar Inference Engineering Handbook
+# Build a Qwen3.8-27B engine on one RTX 5090
 
-Baseline: DwarfStar [`c1d4597`](https://github.com/antirez/ds4/tree/c1d4597a80e300b803dc642519718f2c999589da), 2026-08-27.
+This handbook has one outcome: help a systems programmer build a narrow,
+text-first inference engine for Qwen3.8-27B on a 32 GiB RTX 5090. It is a design
+and implementation guide, not Qwen support for DwarfStar and not a promise of a
+particular speed. DwarfStar is a worked systems case study.
 
-This is a self-paced path for a systems programmer who knows C and memory
-hierarchies but is new to GPU language-model inference. DwarfStar is the
-worked example, not a universal winner: it deliberately specializes for a few
-model layouts. The final chapters ask which ideas survive when the target is a
-dense multimodal Qwen model on one RTX 5090.
+## Authority and evidence
 
-## How to read
+Pin all inputs before writing code. The model contract comes from the official
+[configuration](https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/config.json),
+[checkpoint](https://huggingface.co/Qwen/Qwen3.8-27B), tokenizer/chat template,
+and the Transformers `qwen3_5` implementation. The checkpoint is named Qwen3.8,
+but its configuration declares `model_type: qwen3_5`; follow the declared
+implementation, not a guessed module name. Use a pinned llama.cpp revision as
+an independent execution oracle. [q27](https://github.com/signalnine/q27) is an
+attributed specialization case study; its measurements do not describe
+DwarfStar or the engine proposed here.
 
-1. [Foundations](01-foundations.md) — vocabulary, shapes, rooflines.
-2. [From prompt to token](02-execution-path.md) — a complete call and state trace.
-3. [DeepSeek V4](03-deepseek-v4.md) — compressed attention, indexer, mHC, MoE, DSpark.
-4. [Numerics and preparation](04-numerics.md) — formats, calibration, quality.
-5. [GPU implementation](05-gpu-implementation.md) — dispatch, fusion, lifetimes, graphs.
-6. [System optimization](06-system-optimization.md) — streaming, caching, parallelism.
-7. [Engineering method](07-engineering-method.md) — oracles, tests, benchmarks.
-8. [RTX 5090 lab](08-rtx-5090.md) — Blackwell constraints and experiments.
-9. [Engine comparison](09-engine-comparison.md) — choose goals before engines.
-10. [Qwen3.8-27B transfer study](10-qwen-transfer.md) — direct transfers and redesigns.
-11. [Glossary and worksheets](11-glossary-worksheets.md) — review and capstone.
-12. [Source and evidence ledger](sources.md) — claims, anchors, confidence.
+## Two reading tracks
 
-Every performance statement uses one label:
+The fundamentals track is Chapters 1, 3, 5, 6, 7, and 8. The implementation
+track is Chapters 2, 4, 9, and 10. Both end at Chapter 11.
 
-- **Measured:** produced by a named repository fixture on named hardware.
-- **External:** reported by a linked primary source; not reproduced here.
-- **Estimated:** arithmetic from stated inputs; not a benchmark.
-- **Proposed:** a reproducible experiment whose result is not yet known.
+1. [Inference fundamentals](01-foundations.md): shapes, bytes, rooflines.
+2. [A complete DwarfStar request](02-execution-path.md): reusable mechanics and model-specific traps.
+3. [The Qwen model contract](03-deepseek-v4.md): the forward pass and state.
+4. [Scalar oracle](04-numerics.md): reference implementation and differential tests.
+5. [Weights and the 32 GiB ledger](05-gpu-implementation.md): conversion and quantization.
+6. [CUDA decode and prefill](06-system-optimization.md): MMV, MMQ, GDN, attention.
+7. [Hybrid sessions](07-engineering-method.md): checkpointing, reuse, batching, graphs.
+8. [RTX 5090 optimization](08-rtx-5090.md): profiler-led sequencing.
+9. [Gated implementation roadmap](09-engine-comparison.md): twelve acceptance milestones.
+10. [Deferred MTP and vision](10-qwen-transfer.md): extensions without text-core redesign.
+11. [Glossary, worksheets, and exercises](11-glossary-worksheets.md).
+12. [Source and evidence ledger](sources.md).
 
-Stable symbols plus the pinned commit are authoritative. Line numbers in source
-links are navigation aids because later commits move them.
+Claims use four labels: **Measured** (this exact artifact and hardware),
+**External** (a linked source), **Estimated** (reproducible arithmetic), and
+**Proposed** (a design or experiment not yet demonstrated).
 
-## Update checklist
+## Engine boundary
 
-- Record the new commit and date; keep this baseline available in history.
-- Diff `ds4_shape`, `config_validate_model`, graph allocation, cache serialization,
-  quant block definitions, and CUDA dispatch.
-- Re-run the internal-link checker and Mermaid rendering.
-- Recalculate shape and memory tables; relabel any stale measurements.
-- Recheck primary Qwen, NVIDIA, CUDA, and engine documentation.
-- Audit for unqualified “faster”, “fits”, and “supported” claims.
+- `ModelSpec`: validated dimensions, layer kinds, tensor names, dtypes, and quantization policy.
+- `ModelWeights`: immutable resident or repacked tensors.
+- `SequenceInput`: token embeddings and position metadata; later visual embeddings.
+- `SessionState`: 48 recurrent matrices and convolution rings, 16 KV caches, position frontier, and optional MTP state.
+- `BackendOps`: reference and CUDA projection, norm, RoPE, GDN, attention, FFN, and logits operations.
+
+The text path is `template -> token IDs -> embeddings -> 64 hybrid layers ->
+final norm -> logits -> sampler`. Weights belong to the engine; prefix-dependent
+data belongs to the session. V1 excludes vision and MTP.
+
+## Chapter contract
+
+Each technical chapter covers motivation, concepts, worked shapes, a DwarfStar
+example, transfer boundaries, concrete work, failure modes, and a verification
+exercise with an expected result.
 

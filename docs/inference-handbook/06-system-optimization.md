@@ -1,60 +1,66 @@
-# 6. System-level optimization
+# 6. CUDA execution for decode and prefill
 
 [Previous](05-gpu-implementation.md) · [Index](README.md) · [Next](07-engineering-method.md)
 
-Once weights exceed fast memory, placement and scheduling become model code.
+## Why this matters
 
-## SSD expert streaming
+One CPU loop translated into one kernel leaves decode launch-bound and prefill
+compute-starved. Dispatch must reflect row count and the GDN dependency chain.
 
-DwarfStar keeps dense/shared tensors resident where possible and streams routed
-expert slices. A selected-expert cache and hotlist exploit routing locality.
-Reads for missing experts overlap work on the shared expert and already resident
-experts; prefill can load the next layer while the current one computes.
-`ds4_ssd.c`, `graph_stream_expert_table_make`, and
-`metal_graph_decode_selected_readahead_override` are the reading path.
+## Phase-specific dataflow
 
-The latency bound becomes roughly `max(compute, missing_bytes/storage_rate)` only
-when asynchronous reads begin early enough; otherwise costs add. Page cache and
-mmap residency can make repeated tests look like SSD wins. Record cold/warm
-state, cache hit rate, bytes read, queue depth, and tail latency.
+For decode (`T=1`), select quantized MMV kernels, fuse cheap elementwise work
+where proven, and update state in place. For prefill (`T>1`), select MMQ/GEMM,
+reuse weights across rows, and use chunked GDN scans. Dispatch keys include
+format, input/output widths, row bucket, dtype, alignment, tails, GPU capability,
+and graph compatibility; unsupported combinations fail explicitly.
 
-## KV compression and checkpoints
+```mermaid
+flowchart TD
+  X[rows T x 5120] --> D{T / shape}
+  D -->|decode| M[MMV projections]
+  D -->|prefill| Q[MMQ projections]
+  M --> R[one-step GDN or KV attention]
+  Q --> C[chunk GDN scan or causal attention]
+  R --> F[fused norm/gate/residual where proven]
+  C --> F
+```
 
-Raw recent rows protect local fidelity; compressed append-only rows bound
-long-context growth; state tensors preserve unfinished windows. Disk checkpoints
-turn a long prefix into reusable state, but are version/layout-specific and must
-be committed atomically by the surrounding KV store. API prefix reuse compares
-token IDs—not source strings—then resumes at the common prefix.
+## GDN kernels
 
-## Batching and parallelism
+Decode needs: packed QKV/Z/a/b projections; convolution-ring shift and depthwise
+dot; Q/K normalization and 3x head mapping; FP32 decay/prediction/delta/outer
+update; gated RMSNorm; output projection. Preserve exact update order. Prefill
+may process chunks (the official reference uses 64) but the final recurrent and
+convolution state must equal token-by-token execution for arbitrary chunk splits.
 
-Microbatching collects one decode token from several sessions. It raises matrix
-rows and weight reuse, at the cost of queueing and more per-session KV. Report
-aggregate and per-request latency.
+The `[48,128,128]` matrices expose parallel heads and tiles but each token
+depends on the previous matrix. Avoid materializing repeated Q/K heads; map
+value head `h` to QK head `h/3`. Test sequence tails and chunk sizes 1, 3, 4,
+63, 64, 65, and nonmultiples of every kernel tile.
 
-| Method | Partition | Main cost/risk |
-|---|---|---|
-| pipeline parallel | contiguous layer ranges | bubbles, activation transport |
-| tensor parallel | matrix/expert dimensions | collective latency each layer |
-| expert parallel | routed experts | load imbalance, token all-to-all |
-| data parallel | whole replicas | duplicated weights, easy scaling |
+## Attention and FFN kernels
 
-DwarfStar’s two-rank TP maps contiguous expert halves and replicates dense
-weights; CUDA TP requires an even GPU count. Distributed layer slices can combine
-machines to aggregate memory. These policies fit its layouts and are not general
-proofs about the best sharding for another model.
+Attention decode reads growing KV from 16 layers; use grouped-query mapping
+without physical sixfold copies. Prefill must be causal and handle partial RoPE
+on exactly 64 dimensions. Dense FFNs dominate weights: MMV for one/few rows,
+MMQ for prompt or batched rows. Fusion is accepted only when the unfused path
+remains a differential oracle and profiler data attributes a wall-time win.
 
-## Scheduler policy
+## DwarfStar transfer boundary
 
-Prefer short bounded prefill chunks so a long prompt does not starve decode.
-Schedule ready decode microbatches; cap memory by session; group compatible graph
-shapes; account for cancellation. Prefix-cache admission should weigh bytes
-saved, expected reuse, and eviction cost rather than prefix length alone.
+Reuse MMV/MMQ phase split, quant block tests, explicit unavailable paths, stable
+scratch, tail tests, and graph-capture discipline. Adapt dispatch shapes and
+fusion. Discard sparse attention and MoE kernels.
 
-## Check and experiment
+## Common failures and verification
 
-Replay a fixed expert-ID trace against LRU and hotlist-seeded caches. Expected:
-hotlists help only if the workload resembles profiling. Run cold and warm SSD
-trials after documenting OS cache control. Expected: warm results are faster and
-must not be labeled storage throughput.
+Typical failures are selecting MMQ by prompt intent rather than actual row
+count, missing tail columns, storing expanded heads, FP16 recurrence, updating
+state twice during graph capture, and timing without synchronization.
+
+Exercise: compare CUDA and scalar taps for single-token decode and 256-token
+prefill, then for every boundary size above. Expected: declared numerical gates
+pass; token-wise and chunked final state agree; the profiler shows MMV in decode
+and MMQ in prefill. Speed is recorded, not an acceptance substitute.
 

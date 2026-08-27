@@ -1,66 +1,61 @@
-# 11. Glossary, worksheets, and capstone
+# 11. Glossary, worksheets, and review
 
 [Previous](10-qwen-transfer.md) · [Index](README.md) · [Sources](sources.md)
 
 ## Glossary
 
-- **Arithmetic intensity:** operations per byte moved at the measured level.
-- **Decode:** evaluation of newly committed token positions, often one/session.
-- **Expert:** one MoE FFN selected by a router; absent in dense Qwen FFNs.
-- **GGUF:** metadata plus named, typed, aligned tensor container.
-- **ITL:** inter-token latency experienced by one request.
-- **KV cache:** attention state retained from prior positions.
-- **mHC:** DeepSeek’s multi-stream hyper-connection residual mechanism.
-- **MMQ/MMVQ:** quantized matrix-matrix / matrix-vector kernel families.
-- **MTP:** auxiliary multi-token prediction used for training or speculation.
-- **Occupancy:** resident warps relative to hardware capacity; not utilization.
-- **Prefill:** evaluation of a prompt suffix, normally many token rows.
-- **RoPE/mRoPE:** rotary positional encoding / modality-aware variant.
-- **TTFT:** request arrival to first emitted token.
+- **Decode:** advance newly committed positions, often one per session.
+- **Gated DeltaNet (GDN):** recurrent token mixer with decay and delta update.
+- **ITL / TTFT:** inter-token latency / time to first token.
+- **KV cache:** growing full-attention key/value rows; not GDN state.
+- **MMV / MMQ:** matrix-vector / matrix-matrix kernel families (often quantized).
+- **MTP:** multi-token prediction used for speculative proposals after v1.
+- **mRoPE:** modality-aware temporal/height/width rotary positions.
+- **Prefill:** evaluate an unmatched prompt suffix, usually many rows.
+- **RoPE:** rotary position encoding; Qwen text attention rotates 64 dimensions.
+- **State frontier:** last atomically committed sequence position.
 
-## Tensor worksheet
+## Tensor and state worksheet
 
-| Tensor/state | Logical shape | Format | Lifetime | Bytes | Access pattern |
+| Item | Logical shape | Format | Lifetime | Bytes | Oracle tap |
 |---|---|---|---|---:|---|
-| weights | | | engine | | decode/prefill |
-| raw/recurrent state | | | session | | per layer/token |
-| full KV | | | session | | append + attention read |
-| logits | `[vocab]` | F32 | session | `4*vocab` | write then sample |
-| workspace | | | session/shared | | kernel-specific |
+| embeddings / LM head | `[248320,5120]` each | | engine | | embedding/logits |
+| GDN recurrence | `48 layers * [48,128,128]` | FP32 v1 | session | 144 MiB | each GDN output |
+| convolution rings | `48 * [10240,4]` | FP32 v1 | session | 7.5 MiB | post-convolution |
+| full K and V | `16 * 2 * [C,4,256]` | BF16 v1 | session | `65536*C` | attention output |
+| logits | `[248320]` | FP32 | session | 993,280 B | final logits |
+| workspace/repack/graphs | measured plan | | engine/session | | allocation log |
 
-For quant blocks use `ceil(elements/block_values) * block_bytes`, then tensor
-alignment. Track host mapping, device copy and derived repack separately.
+For each blank, record source key, orientation, block metadata, alignment,
+owner, address stability, and checksum. Totals must reconcile with runtime logs.
 
-## Benchmark worksheet
+## Verification worksheet
 
-| Goal | Controlled variables | Primary metric | Correctness gate |
-|---|---|---|---|
-| interactive | model/quant/prompt/context | TTFT, p95 ITL | identical template + quality |
-| prefill | token count/chunk/cache state | prompt tok/s | final logits |
-| serving | arrival trace/session cap | aggregate tok/s + p95 | no failed requests |
-| memory | context/batch/features | peak host/device bytes | completes fixture |
+| Scenario | Compare | Expected result |
+|---|---|---|
+| positions 0–5 | GDN convolution and recurrence | oracle agreement through warm-up |
+| prompt lengths 1/4/5/63/64/65 | full tap set | tolerance gates pass |
+| layers 2/3/4/63 | scheduler and mixer taps | correct kind and residual order |
+| arbitrary prefill chunks | final state and logits vs decode | equivalent result |
+| arbitrary save/restore | uninterrupted continuation | all hybrid state agrees |
+| 32K and larger context | allocation ledger and completion | admitted sizes retain reserve |
+| quant vs high precision | logits, NLL/PPL, long/task suite | declared quality budget passes |
+| MTP accept/partial/reject | target-only run | same committed sequence/state |
+| future visual rows | Transformers embeddings/positions/logits | multimodal boundary agrees |
 
-## Small labs
+## Reader labs
 
-1. **Roofline:** measure copy bandwidth and FMA throughput. Expected: kernels
-   approach different ceilings as intensity rises.
-2. **Quant dot:** inspect `block_q2_K`; implement scalar decode on 256 values.
-   Expected: metadata makes storage exceed exactly 2 bits/value.
-3. **Graph capture:** capture a fixed-address chain, then vary a pointer.
-   Expected: replay requires updated nodes or a distinct cache key.
-4. **KV boundary:** test positions around ratios 4 and 128. Expected: compressed
-   row counts and partial states follow exact boundaries.
-5. **Balanced A/B:** alternate variant order. Expected: order effects become
-   visible rather than silently assigned to the second variant.
+1. Derive the 10,240 packed GDN width and label every slice. Expected:
+   `16*128 + 16*128 + 48*128`.
+2. State the recurrence update without consulting code. Expected: decay state,
+   predict at K, beta-scaled correction, outer update, query readout.
+3. Fill an allocation ledger from an artifact and runtime log. Expected: explain
+   every byte category and prove reserve after graph creation.
+4. Specify scalar milestone steps. Expected: pin, inventory, embed, 64 scheduled
+   blocks, final norm/head, intermediate taps, two independent comparisons.
+5. Review every claim label and link. Expected: measured, external, estimated,
+   and proposed statements cannot be mistaken for one another.
 
-## Capstone questions
-
-- Trace one Flash token through mHC, Q/KV, compression, index selection, shared
-  and routed experts, logits, sampling, and checkpoint commit.
-- Produce a 5090 allocation ledger for a specific Qwen artifact, including
-  vision, MTP, recurrent state, 32K KV, workspace and reserve.
-- Propose one fusion. State shapes, numerical oracle, fallback, graph impact,
-  profiler counters, and rollback gate.
-- Design a fair DwarfStar-versus-general-engine study at concurrency one and
-  eight. Explain why the conclusions may differ.
+The handbook passes reader review when someone unfamiliar with GDN can complete
+labs 1–4 and state the implementation sequence without undocumented assumptions.
 

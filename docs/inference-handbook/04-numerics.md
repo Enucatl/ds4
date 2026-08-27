@@ -1,72 +1,71 @@
-# 4. Numerics and model preparation
+# 4. Scalar reference and tensor oracles
 
 [Previous](03-deepseek-v4.md) · [Index](README.md) · [Next](05-gpu-implementation.md)
 
-GGUF records metadata, named tensor dimensions/types, and aligned payloads.
-`model_open` bounds-checks the file; `weights_bind` maps exact names into layer
-roles. Shape validation prevents a plausible-looking but incompatible file from
-reaching a kernel.
+## Why this matters
 
-## Formats in this checkout
+Optimization needs a trusted intermediate-tensor oracle. End-token equality is
+too late to locate a bad layout, recurrence update, or rounding decision.
 
-The canonical C definitions and static sizes are in [`GGUF Quant Block
-Formats`](https://github.com/antirez/ds4/blob/c1d4597a80e300b803dc642519718f2c999589da/ds4.c#L730).
+## Design and dataflow
 
-| Format | Values/block | Bytes/block | Effective bits/value | Role |
-|---|---:|---:|---:|---|
-| F32 | 1 | 4 | 32 | norms, logits, sensitive state |
-| F16 | 1 | 2 | 16 | caches/dense paths on some backends |
-| Q8_K | 256 | 292 | 9.125 | activation/dot representation |
-| Q2_K | 256 | 84 | 2.625 | routed down experts |
-| Q4_K | 256 | 144 | 4.5 | higher-quality routed experts |
-| IQ2_XXS | 256 | 66 | 2.0625 | routed gate/up experts |
-| MXFP4 | 32 | 17 | 4.25 | preserved native routed weights |
+Implement `BackendOps` first as simple, typed host operations. It may be slow,
+but must expose named taps:
 
-“2-bit model” is shorthand, not a uniform representation. DwarfStar’s Q2 mix
-keeps routing, projections, shared experts, norms, embeddings, and output at
-higher precision while aggressively quantizing the dominant routed tensors.
-That asymmetric allocation is a transferable idea: spend error where the model
-tolerates it, not uniformly.
+```text
+SequenceInput -> embed -> for layer 0..63:
+  input norm -> mixer projections -> mixer state/output -> residual
+  post norm -> gate/up -> product -> down -> residual
+-> final norm -> lm_head -> F32 logits
+```
 
-MXFP4 and NVFP4 are not interchangeable names. The former’s block uses an E8M0
-scale and packed FP4 values. NVFP4 support in CUDA kernels has different block
-and scaling assumptions. Blackwell FP4 Tensor Core use also requires compatible
-activation quantization and matrix layout; merely storing 4-bit weights does not
-guarantee native FP4 MMA.
+Keep `ModelSpec` independent of storage. It validates dimensions, the 64-entry
+layer-kind schedule, exact tensor inventory, dtype, orientation, and quant
+policy. `ModelWeights` owns immutable tensors; `SessionState` alone mutates.
+Use FP32 accumulation for norms, softmax, GDN recurrence, and initial comparison.
 
-## Calibration and quality
+## Oracle workflow
 
-An importance matrix (imatrix) measures activation-weight sensitivity on a
-representative corpus, informing quantization error allocation. The offline path
-is in `gguf-tools/deepseek4-quantize.c`; the quality harness collects official
-continuations and compares local outputs. Calibration data leakage or a tiny
-domain can create misleading wins.
+1. Pin checkpoint revision, Transformers revision, llama.cpp revision,
+   tokenizer files, template, prompt bytes, and reference dtype.
+2. Add hooks to save shapes, dtypes, and little-endian raw tensors at embedding;
+   GDN post-convolution, recurrent output, and projection; attention Q/K after
+   norm/RoPE and output; FFN output; final norm; logits.
+3. Feed the same IDs and positions to the scalar engine. Compare max absolute,
+   max relative, RMS error, cosine similarity, and first failing index.
+4. Compare Transformers first, then llama.cpp as an independent oracle. A
+   disagreement between authorities is investigated, not averaged away.
 
-Use this acceptance ladder:
+Use one-token fixtures at positions 0–5 for convolution warm-up; prompts of
+length 1, 4, 5, 63, 64, and 65; and taps around layers 3/4 and 63. Check chunked
+prefill against token-by-token decode by comparing final logits and every state
+byte or tolerance-defined state value.
 
-1. Tensor-level dequant/dot tests on known blocks.
-2. CPU-versus-backend differential logits at layer boundaries.
-3. Greedy continuation equality or explained floating-point divergence.
-4. A fixed multi-domain official-output score set.
-5. Long-context and tool-call behavior.
+## DwarfStar transfer boundary
 
-## Memory worksheet
+DwarfStar's CPU-only diagnostic path, tensor validation before binding, quant
+dot tests, and CPU/GPU boundary comparisons transfer unchanged. Its tensor
+roles, compression fixtures, and permissive fallback assumptions do not.
 
-For each tensor: `elements * effective_bits / 8`, including block metadata and
-alignment. Then add duplicated device mappings, derived/repacked weights, KV,
-compressor state, logits, temporary activations, CUDA libraries/graphs, server
-sessions, and a safety reserve. File size is not peak VRAM.
+## Concrete work and acceptance gate
 
-**Estimated DeepSeek example.** The published Flash Q2 download target is
-described as suitable for 96/128 GB system-memory machines, so it cannot be a
-resident single-5090 workload. SSD streaming may make execution possible but
-changes the bottleneck to PCIe/storage and is not asserted to be practical here.
+The scalar milestone passes only when one-token and multi-token prompts match
+both semantic authorities at every available boundary, greedy continuations are
+stable, and a save/restore at each tested position produces the uninterrupted
+result. Store fixtures with source hashes and generation commands.
 
-## Check and experiment
+## Common failures
 
-Run `make q4k-dot-test mxfp4-dot-test`. Expected: quantized dot products match
-their scalar references within the test tolerance. Quantize a held-out tensor
-with and without imatrix weighting; expected: byte size stays similar while
-weighted error distribution changes. Model-quality improvement remains an
-experiment, not a deduction.
+- Comparing logits only, or loosening tolerance until a structural bug passes.
+- Transposing checkpoint matrices twice.
+- Applying the convolution to unpacked Q/K/V independently.
+- Updating session state while producing diagnostic retries.
+- Allowing a GPU fallback into the reference path.
+
+## Exercise and expected result
+
+Implement one GDN head for five tokens with a four-entry convolution ring.
+Compare streaming and whole-sequence execution. Expected: every output and the
+final recurrent/ring state agree; corrupting the oldest warm-up row first causes
+a difference at the predictable convolution boundary.
 

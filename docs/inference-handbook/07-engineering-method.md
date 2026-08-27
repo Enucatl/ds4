@@ -1,67 +1,63 @@
-# 7. Correctness-first engineering
+# 7. Hybrid session state
 
 [Previous](06-system-optimization.md) · [Index](README.md) · [Next](08-rtx-5090.md)
 
-An optimization is complete only when its semantic boundary and performance
-effect are both measured.
+## Why this matters
 
-## Oracles and gates
+Prefix reuse, batching, checkpointing, and CUDA Graphs all depend on precise
+state ownership. Qwen's state is both fixed recurrent data and growing KV.
 
-Use the scalar/CPU path for local numerical differentials and official model
-continuations for end-to-end behavior. CPU parity alone can preserve a shared
-bug; text equality alone misses compensating drift. The repository’s test and
-release protocols are [CONTRIBUTING.md](../../CONTRIBUTING.md),
-[QA_BEFORE_RELEASES.md](../../QA_BEFORE_RELEASES.md), and
-[quality-testing](../../gguf-tools/quality-testing/README.md).
-
-For each change:
-
-1. State the exact hot path, supported shapes/formats, and fallback.
-2. Add tensor tests including tails, alignment, zero scales, and extreme values.
-3. Compare layer/logit outputs with the reference at short and compression
-   boundary contexts.
-4. Run fixed greedy continuations and scored official continuations.
-5. Benchmark balanced A/B order with identical model, prompt, context, clocks,
-   cache state, sampling, and concurrency.
-6. Gate regression: repository release policy treats repeatable slowdown over
-   10% in prefill, decode, or aggregate batch as a blocker.
-
-## Benchmark record
+## Session layout and transitions
 
 ```text
-commit/model checksum/quant/backend/toolkit/driver/GPU/power+clocks
-prompt hash; input/output tokens; context frontier; batch/sessions
-warmups and repetitions; cold/warm storage; sampling seed/settings
-TTFT p50/p95; ITL p50/p95; prefill tok/s; decode tok/s
-aggregate tok/s; peak device+host bytes; quality parity result
+SessionState
+  gdn[48]: recurrent FP32[48,128,128], conv ring[10240,4], ring frontier
+  attention[16]: K and V[positions,4,256], logical length/capacity
+  position_frontier: committed text and future mRoPE coordinates
+  committed_input_identity: token IDs plus template/tokenizer identity
+  optional_mtp: absent in v1
 ```
 
-Measure with events around GPU work and wall-clock around the request. Synchronize
-only at intended boundaries. Median hides stalls; publish distributions and raw
-CSV. A faster greedy result is invalid if it uses a different continuation.
+`begin_step` obtains writable state, kernels produce logits and next state, and
+`commit_step` advances every layer and the input frontier atomically. On error,
+none advances. Prefill chunk boundaries are implementation details and may not
+change the final state.
 
-## History as evidence
+Checkpoint headers include magic/version, endianness, model/config/weights,
+tokenizer/template and quant hashes, context/capacity, committed positions,
+per-section shapes/dtypes/lengths/checksums, and feature flags. Write to a new
+payload and publish atomically. Restore validates everything before mutation.
 
-Read comments around CUDA decode graph capture, MMQ gating, exact split-score
-graphs, and DSpark state reuse. They record recurring lessons: graph capture can
-regress kernels when addresses/control vary; alternative reductions change
-floating-point grouping; fast speculative paths need an exact sampling mode;
-specialized kernels need explicit fallback. “Rejected” remains provisional for
-a new GPU, batch size, or layout—rerun the experiment rather than cargo-culting.
+Prefix reuse compares rendered token IDs and position metadata. An exact saved
+prefix can restore directly; a shorter common prefix needs a checkpoint at or
+before it plus replay. Arbitrary rollback is not obtained by truncating KV:
+GDN recurrence is not invertible. Maintain deliberate checkpoint intervals.
 
-## Reproducible suite
+## Batching and CUDA Graph constraints
 
-- TTFT: fixed 128, 2K, and 8K prompts; time request arrival to first emitted token.
-- Decode: 256 generated tokens at context frontiers; report ITL distribution.
-- Prefill: `ds4-bench` with fixed prompt file and chunk policy.
-- Serving: 1/2/4/8 sessions, fixed arrival schedule, aggregate plus p95 latency.
-- Memory: driver peak plus engine accounting at each context/session count.
-- Quality: identical tokenizer/template and deterministic output fixture.
-- Long context: cross raw/compression boundaries and checkpoint save/restore.
+Batch only ready work with compatible kernel shapes. Per-session state remains
+disjoint; weight reads may be shared. Record queue delay separately from kernel
+time. Capacity planning multiplies the full session ledger, not only KV.
 
-## Check
+Graph capture requires stable addresses and allocation-free replay. A graph key
+contains batch/row bucket, kernel and quant policy, KV layout/capacity class,
+workspace addresses or generations, feature set, and any control path changing
+topology. Logical lengths may be parameters only if every captured kernel reads
+them safely. Instantiate graphs before declaring the VRAM fit.
 
-Given a 12% faster run with different output tokens, classify it. Expected: not
-a valid speed comparison until semantics/quality are reconciled. Given 5% median
-gain and 30% worse p95, decide from the serving goal, not the mean.
+## DwarfStar transfer boundary
+
+Reuse engine/session lifetimes, token-prefix comparison, versioned checkpoint
+validation, allocation guards, and graph discipline. Adapt the payload and keys.
+Discard compressed row counts/windows and expert identities.
+
+## Failure modes and exercise
+
+Failures include KV-only saves, physical rather than logical ring order,
+non-atomic commits, restoring across a quant/template mismatch, sharing mutable
+state between batch slots, or capturing allocator calls.
+
+Save/restore after positions 1, 3, 4, 5, 32K, and arbitrary chunk boundaries.
+Expected: continuation logits and every state component equal uninterrupted
+execution. Prefix forks share immutable weights but never mutable buffers.
 
