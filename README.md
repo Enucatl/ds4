@@ -78,6 +78,9 @@ next sections.
 
 - [CONTRIBUTING.md](CONTRIBUTING.md): correctness and speed regression testing
   guide for contributors. **Read this before sending a pull request**.
+- [docs/inference-handbook/](docs/inference-handbook/README.md): a self-paced
+  guide from transformer fundamentals through DwarfStar's GPU implementation,
+  RTX 5090 experiments, and a Qwen3.8-27B transfer study.
 - [QA_BEFORE_RELEASES.md](QA_BEFORE_RELEASES.md): the complete release test
   matrix, including the remote Metal, CUDA, and ROCm machines.
 - [gguf-tools/README.md](gguf-tools/README.md): offline GGUF generation,
