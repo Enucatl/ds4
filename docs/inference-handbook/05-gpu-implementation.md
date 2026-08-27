@@ -10,6 +10,13 @@ high-precision path passes makes errors hard to attribute.
 
 ## Inventory before conversion
 
+Model conversion is a translation between two representations of the same
+numbers. A **tensor inventory** says what every source array means; a **repack**
+changes its physical order so a kernel can read it efficiently; **quantization**
+replaces exact values with an approximation plus scales. Keeping these three
+operations separate makes it possible to identify whether a mismatch came from
+the model binding, layout, or precision.
+
 Emit one manifest row per checkpoint tensor: canonical role, source name, shape,
 dtype, elements, source bytes, destination format/block size, payload bytes,
 alignment, checksum, and transpose/repack. Reject missing, duplicate, extra
@@ -23,7 +30,11 @@ scalar dequantizer and compare each converted tensor's checksum.
 
 ## Quantization policy
 
-Bring up BF16/FP16 weights with FP32 sensitive state first. Then calibrate on a
+Bring up BF16/FP16 weights with FP32 sensitive state first. A quantized block
+usually stores a small group of integer codes and one or more scale values. The
+decoder reconstructs approximate floating-point values while doing the dot
+product. Thus “4-bit” describes the codes, not necessarily four bits per tensor
+element after scales, padding, and headers are included. Then calibrate on a
 representative corpus and change one tensor class at a time. A reasonable
 **Proposed** order is FFN gate/up, FFN down, mixer projections, embeddings/LM
 head, and finally recurrence-sensitive GDN paths only if evidence permits.
@@ -65,4 +76,3 @@ high-precision oracle, or claim quality from perplexity alone. Exercise: fill
 the ledger from an actual artifact and context 32K. Expected: logged allocation
 totals reproduce the sum within allocator accounting, the process completes a
 fixture, and free reserve remains after graphs; otherwise the fit gate fails.
-

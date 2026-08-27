@@ -9,8 +9,15 @@ too late to locate a bad layout, recurrence update, or rounding decision.
 
 ## Design and dataflow
 
+An **oracle** is a slower implementation trusted enough to tell us what the
+optimized implementation should produce. “Scalar” means that the reference
+uses straightforward loops and explicit indexing rather than relying on a
+specialized matrix kernel. It is not intended for serving; it is intended to
+make one wrong transpose or update order obvious.
+
 Implement `BackendOps` first as simple, typed host operations. It may be slow,
-but must expose named taps:
+but must expose named taps. A tap is a copy of an intermediate tensor at a
+named boundary, saved before the next operation overwrites its buffer:
 
 ```text
 SequenceInput -> embed -> for layer 0..63:
@@ -19,7 +26,9 @@ SequenceInput -> embed -> for layer 0..63:
 -> final norm -> lm_head -> F32 logits
 ```
 
-Keep `ModelSpec` independent of storage. It validates dimensions, the 64-entry
+The arrows describe data ownership as well as computation: embeddings and
+activations are temporary, weights are read-only, and session state is the only
+mutable input that survives a call. Keep `ModelSpec` independent of storage. It validates dimensions, the 64-entry
 layer-kind schedule, exact tensor inventory, dtype, orientation, and quant
 policy. `ModelWeights` owns immutable tensors; `SessionState` alone mutates.
 Use FP32 accumulation for norms, softmax, GDN recurrence, and initial comparison.
@@ -40,6 +49,13 @@ Use one-token fixtures at positions 0–5 for convolution warm-up; prompts of
 length 1, 4, 5, 63, 64, and 65; and taps around layers 3/4 and 63. Check chunked
 prefill against token-by-token decode by comparing final logits and every state
 byte or tolerance-defined state value.
+
+For a numerical comparison, **absolute error** catches a fixed-size offset,
+**relative error** catches scale-dependent drift, RMS error summarizes the whole
+tensor, and cosine similarity catches a changed direction. None is sufficient
+alone: a nearly zero reference value makes relative error unstable, while a
+cosine score can hide one bad channel. Set tolerances per boundary and dtype
+before looking at the candidate result.
 
 ## DwarfStar transfer boundary
 
@@ -68,4 +84,3 @@ Implement one GDN head for five tokens with a four-entry convolution ring.
 Compare streaming and whole-sequence execution. Expected: every output and the
 final recurrent/ring state agree; corrupting the oldest warm-up row first causes
 a difference at the predictable convolution boundary.
-

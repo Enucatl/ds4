@@ -9,6 +9,13 @@ update differs. This is the executable forward-pass specification.
 
 ## Validated constants
 
+Read this table as a wiring diagram, not as tuning advice. A **hidden size** is
+the width of the vector passed from layer to layer. A **head** is an independent
+smaller vector space used by a mixer; splitting into heads lets the hardware
+perform many small operations in parallel. “QK heads” produce queries and keys;
+“value heads” produce the values that are accumulated. The counts need not be
+equal, which is why the implementation has to repeat Q/K heads explicitly.
+
 | Field | Value |
 |---|---:|
 | vocabulary / residual / FFN | 248,320 / 5,120 / 17,408 |
@@ -25,7 +32,14 @@ Full-attention layers are zero-based `3,7,...,63`. Test transitions `2 -> 3`,
 
 ## Common block and weights
 
-RMSNorm computes in FP32 and scales by `(1 + weight)`. Each layer runs:
+The model is a **pre-norm residual block**. `x` is the vector entering a layer;
+`RMSNorm` rescales it using its root-mean-square magnitude, and `Mixer` means
+either GDN or full attention depending on the layer number. The `x + ...` is a
+residual connection: the layer learns a correction while preserving a direct
+path for information and gradients. The second residual branch is a dense FFN.
+RMSNorm computes in FP32 and scales by `(1 + weight)` (the parameter is stored
+as an offset from one), which differs from implementations that store the full
+scale directly. Each layer runs:
 
 ```text
 x <- x + Mixer(RMSNorm(x))
@@ -55,6 +69,13 @@ prefixes can differ across checkpoint tooling.
 
 ## Gated DeltaNet
 
+GDN is a learned recurrent filter. Unlike full attention, it does not retain a
+separate representation of every prior token. Instead, `S` is a summary matrix
+that is updated when a token arrives. The projections below manufacture the
+query, key, value, gate, and decay controls used by that update. The packed
+projection is split by contiguous channel ranges; splitting after a convolution
+would produce a different model.
+
 From normalized `u[B,T,5120]`:
 
 ```text
@@ -67,8 +88,12 @@ b = in_proj_b(u)             -> [B,T,48]
 a = in_proj_a(u)             -> [B,T,48]
 ```
 
-Apply depthwise causal width-4 convolution and SiLU to packed QKV. L2-normalize
-Q/K and repeat each Q/K head three times. Let `beta=sigmoid(b)`,
+Apply depthwise causal width-4 convolution and SiLU to packed QKV. “Causal” means
+the output at position `t` can use the current row and the previous three rows,
+but not a future row. The ring buffer is the compact way to provide those rows
+during decode. L2-normalize Q/K and repeat each Q/K head three times: 16 source
+heads become 48 heads so each value head has a matching query and key. Let
+`beta=sigmoid(b)`,
 `g=-exp(A_log)*softplus(a+dt_bias)`, and `q=Q/sqrt(128)`. Per head, with FP32
 `S[128,128]`:
 
@@ -80,11 +105,22 @@ S <- S + k_t outer delta
 y_t <- q_t^T S
 ```
 
-Apply headwise RMSNorm to `y`, multiply by `SiLU(Z)`, flatten 48 heads to 6,144,
-and apply `out_proj[5120,6144]`. Persistent state is FP32 `[48,128,128]` and
+The recurrence first decays old information, predicts what the current key would
+retrieve from the old summary, and writes only the prediction error (`delta`).
+`beta` controls how strongly that error is written. The query then reads the
+updated summary. This order is essential: reading before writing or applying
+the decay at a different point changes every later token. Apply headwise RMSNorm
+to `y`, multiply by `SiLU(Z)`, flatten 48 heads to 6,144, and apply
+`out_proj[5120,6144]`. Persistent state is FP32 `[48,128,128]` and
 the official cache's last four packed QKV rows `[10240,4]` per GDN layer.
 
 ## Full attention and positions
+
+Full attention keeps the familiar three roles: Q asks what this token wants to
+retrieve, K describes each stored token for matching, and V contains the content
+to retrieve. Qwen's 24 query heads share four K/V heads (six query heads per
+KV head), reducing cache size. The extra half of `q_proj` is an output gate;
+it is not another attention head.
 
 `q_proj` emits `[T,24,512]`, split into query and gate halves of 256. K and V
 are `[T,4,256]`. Apply per-head Q/K RMSNorm, RoPE to 64 dimensions, append K/V,
@@ -92,8 +128,11 @@ repeat KV heads sixfold conceptually, compute causal attention scaled by
 `1/sqrt(256)`, multiply output by `sigmoid(gate)`, flatten to 6,144, and apply
 `o_proj[5120,6144]`.
 
-Text constructs four identical scalar-position channels: channel 0 controls the
-causal mask and channels 1–3 supply rotary positions. A future multimodal
+RoPE rotates paired coordinates by a position-dependent angle so attention can
+use relative order without adding a learned position vector. Qwen rotates only
+64 of each 256-dimensional head. Text constructs four identical scalar-position
+channels: channel 0 controls the causal mask and channels 1–3 supply rotary
+positions. A future multimodal
 processor supplies temporal/height/width positions and visual embeddings.
 
 ## State and transfer ledger

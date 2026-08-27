@@ -10,7 +10,10 @@ runnable path or silently become requirements.
 
 ## MTP as a separate state machine
 
-The config exposes one MTP hidden layer. Implement it only after the target text
+**Speculative decoding** separates a cheap proposer from the trusted target.
+The proposer guesses several next tokens; the target evaluates them and decides
+how many are valid. “Acceptance” means committing the target's state for a
+prefix of those guesses, not merely displaying their text. The config exposes one MTP hidden layer. Implement it only after the target text
 model passes all gates. MTP proposes a sequence; the target model verifies it;
 only the accepted prefix commits. Keep draft/MTP KV and transient hidden state
 separate from target `SessionState` until acceptance.
@@ -72,4 +75,3 @@ Draw state after partial acceptance of five proposals and after a prefix with
 one image. Expected: target and MTP frontiers commit only the accepted prefix;
 the multimodal checkpoint contains reproducible visual input/embedding identity,
 mRoPE positions, all GDN state, all full-attention KV, and version hashes.
-

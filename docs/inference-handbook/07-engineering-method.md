@@ -9,6 +9,12 @@ state ownership. Qwen's state is both fixed recurrent data and growing KV.
 
 ## Session layout and transitions
 
+An engine owns data shared by all requests (weights and compiled plans). A
+session owns data that changes when one conversation advances. A checkpoint is a
+serialized snapshot of the latter at a particular committed position. The
+distinction matters because sharing a mutable recurrent matrix between two
+sessions silently makes one conversation affect another.
+
 ```text
 SessionState
   gdn[48]: recurrent FP32[48,128,128], conv ring[10240,4], ring frontier
@@ -60,4 +66,3 @@ state between batch slots, or capturing allocator calls.
 Save/restore after positions 1, 3, 4, 5, 32K, and arbitrary chunk boundaries.
 Expected: continuation logits and every state component equal uninterrupted
 execution. Prefix forks share immutable weights but never mutable buffers.
-

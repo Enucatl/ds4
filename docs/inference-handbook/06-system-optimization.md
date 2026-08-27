@@ -9,6 +9,13 @@ compute-starved. Dispatch must reflect row count and the GDN dependency chain.
 
 ## Phase-specific dataflow
 
+An **MMV** kernel computes a matrix times one (or a few) vectors. It minimizes
+setup for a small row count but cannot reuse each weight tile across many rows.
+An **MMQ** kernel computes a matrix times a matrix. It spends more effort
+tiling, but a weight tile can serve many prompt rows and often maps to tensor
+cores. The names describe the operation, not a promise that one is always
+faster.
+
 For decode (`T=1`), select quantized MMV kernels, fuse cheap elementwise work
 where proven, and update state in place. For prefill (`T>1`), select MMQ/GEMM,
 reuse weights across rows, and use chunked GDN scans. Dispatch keys include
@@ -28,7 +35,10 @@ flowchart TD
 
 ## GDN kernels
 
-Decode needs: packed QKV/Z/a/b projections; convolution-ring shift and depthwise
+The GDN decode kernel is a dependency chain, not just a large matrix multiply.
+It first makes projection rows, then must read the old convolution ring and
+recurrent matrix before writing the new state. A second request cannot safely
+use the same state buffer until the first has committed. Decode needs: packed QKV/Z/a/b projections; convolution-ring shift and depthwise
 dot; Q/K normalization and 3x head mapping; FP32 decay/prediction/delta/outer
 update; gated RMSNorm; output projection. Preserve exact update order. Prefill
 may process chunks (the official reference uses 64) but the final recurrent and
@@ -63,4 +73,3 @@ Exercise: compare CUDA and scalar taps for single-token decode and 256-token
 prefill, then for every boundary size above. Expected: declared numerical gates
 pass; token-wise and chunked final state agree; the profiler shows MMV in decode
 and MMQ in prefill. Speed is recorded, not an acceptance substitute.
-

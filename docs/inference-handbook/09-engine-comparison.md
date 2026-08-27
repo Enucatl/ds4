@@ -10,6 +10,12 @@ unexplained drift.
 
 ## Milestones and acceptance gates
 
+Each row has an input, a visible output, and a decision rule. For example, the
+scalar milestone does not merely “run a prompt”: it emits intermediate tensors,
+compares them with two authorities, and records the first failing boundary.
+That makes a failed gate actionable and prevents a later speed result from
+concealing an earlier semantic error.
+
 | # | Deliverable | Input -> output | Gate |
 |---:|---|---|---|
 | 1 | pinned fixture | prompt/messages -> IDs, positions, logits | hashes and expected logits recorded |
@@ -55,4 +61,3 @@ introduce quantization and CUDA simultaneously, or call a nominal artifact size
 a fit proof. Exercise: for each gate write the exact fixture, observable output,
 tolerance, failure artifact, and rollback criterion. Expected: another engineer
 can run every gate without an oral explanation.
-
