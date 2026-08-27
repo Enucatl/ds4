@@ -30,6 +30,11 @@ equal, which is why the implementation has to repeat Q/K heads explicitly.
 Full-attention layers are zero-based `3,7,...,63`. Test transitions `2 -> 3`,
 `3 -> 4`, and layer 63 explicitly.
 
+The first four layers are therefore GDN 0, GDN 1, GDN 2, and attention 3;
+layer 4 begins the next group. “48 GDN plus 16 attention” does not mean running
+all GDN layers first. The types are interleaved, and every layer consumes the
+residual vector produced by its immediate predecessor.
+
 ## Common block and weights
 
 The model is a **pre-norm residual block**. `x` is the vector entering a layer;
@@ -45,6 +50,12 @@ scale directly. Each layer runs:
 x <- x + Mixer(RMSNorm(x))
 x <- x + down_proj(SiLU(gate_proj(RMSNorm(x))) * up_proj(RMSNorm(x)))
 ```
+
+There are two separate normalizations. The first feeds the mixer. After the
+mixer correction is added, the second feeds the FFN. Reusing the first normalized
+vector would be wrong because the first residual addition changed `x`. With one
+decode token these are vectors; with prefill the operations apply to every row,
+except where the mixer deliberately communicates across positions.
 
 Every layer binds two `[5120]` norms and FFN weights `[17408,5120]`,
 `[17408,5120]`, `[5120,17408]`. Global weights include embeddings and an
@@ -88,6 +99,11 @@ b = in_proj_b(u)             -> [B,T,48]
 a = in_proj_a(u)             -> [B,T,48]
 ```
 
+`B` is the number of sequences processed together and `T` is the number of
+positions per sequence in this call. The final dimension holds contiguous
+channels. Packing Q, K, and V saves projection overhead, but their ranges still
+have distinct meanings and must be sliced at the exact offsets shown.
+
 Apply depthwise causal width-4 convolution and SiLU to packed QKV. “Causal” means
 the output at position `t` can use the current row and the previous three rows,
 but not a future row. The ring buffer is the compact way to provide those rows
@@ -104,6 +120,12 @@ delta <- beta_t * (v_t - prediction)
 S <- S + k_t outer delta
 y_t <- q_t^T S
 ```
+
+The dimensions make the update easier to follow. `k_t^T S` maps a 128-value key
+through the 128-by-128 memory and produces a 128-value prediction. The outer
+product `k_t outer delta` creates another 128-by-128 matrix, so it can update
+`S`. Finally, `q_t^T S` reads a 128-value result. These operations happen
+independently for each of 48 value heads.
 
 The recurrence first decays old information, predicts what the current key would
 retrieve from the old summary, and writes only the prediction error (`delta`).
@@ -128,6 +150,12 @@ repeat KV heads sixfold conceptually, compute causal attention scaled by
 `1/sqrt(256)`, multiply output by `sigmoid(gate)`, flatten to 6,144, and apply
 `o_proj[5120,6144]`.
 
+For one decode token, attention creates 24 score rows over every cached
+position. Softmax turns each row into non-negative weights that sum to one, and
+the weighted values become 24 output heads. “Causal” means position `t` may read
+only positions through `t`. During one-token decode all cached rows are legal;
+during prefill a triangular mask hides later rows in the same chunk.
+
 RoPE rotates paired coordinates by a position-dependent angle so attention can
 use relative order without adding a learned position vector. Qwen rotates only
 64 of each 256-dimensional head. Text constructs four identical scalar-position
@@ -140,6 +168,12 @@ processor supplies temporal/height/width positions and visual embeddings.
 **Estimated, batch one:** recurrent matrices use
 `48*48*128*128*4 = 144 MiB`; convolution state uses
 `48*10240*4*4 = 7.5 MiB`; attention KV uses 64 KiB/token (2 GiB at 32K).
+
+These state types serve different purposes. The recurrent matrix is a learned
+summary and cannot reproduce individual old tokens. The convolution ring keeps
+only the local history needed by the width-four filter. Full KV retains an
+addressable row for every earlier position, so it grows with context. A session
+must carry all three because different layers consume different state.
 
 Reuse DwarfStar validation, ownership, allocation accounting, and differential
 testing. Adapt serialization and hybrid scheduling. Reject compressed attention,

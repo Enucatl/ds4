@@ -13,10 +13,18 @@ runnable path or silently become requirements.
 **Speculative decoding** separates a cheap proposer from the trusted target.
 The proposer guesses several next tokens; the target evaluates them and decides
 how many are valid. “Acceptance” means committing the target's state for a
-prefix of those guesses, not merely displaying their text. The config exposes one MTP hidden layer. Implement it only after the target text
-model passes all gates. MTP proposes a sequence; the target model verifies it;
-only the accepted prefix commits. Keep draft/MTP KV and transient hidden state
-separate from target `SessionState` until acceptance.
+prefix of those guesses, not merely displaying their text. The config exposes
+one MTP hidden layer. Implement it only after the target text model passes all
+gates. MTP proposes a sequence; the target model verifies it; only the accepted
+prefix commits. Keep draft/MTP KV and transient hidden state separate from
+target `SessionState` until acceptance.
+
+Without speculation, the target reads its large weights once per generated
+token. If a cheap proposer guesses several tokens and the target verifies them
+as a batch, one target weight sweep can advance several positions. The speedup
+depends on proposal cost, verification cost, and acceptance length. Incorrect
+guesses are not incorrect output—the target rejects them—but low acceptance can
+make speculation slower than ordinary decode.
 
 ```text
 snapshot target frontier
@@ -25,6 +33,12 @@ target verifies candidates in one or more rows
 accept k: commit target state through c[k-1], commit matching MTP state
 reject suffix: discard its target/MTP speculative state
 ```
+
+If candidates `[A,B,C,D,E]` are proposed and only `[A,B]` pass, the public
+session advances by two positions. State computed for `C,D,E` must be discarded
+or rolled back, and the next ordinary target token is sampled from the correct
+verification boundary. This is why speculative state cannot alias committed
+state casually.
 
 Test full acceptance, partial acceptance, and zero acceptance, including stop
 tokens and stochastic sampling semantics. Each result must equal a non-speculative
@@ -38,11 +52,25 @@ the text core does not need to know whether a row came from token lookup or the
 visual projector. A separate official-compatible processor later performs
 image/video token placement and produces temporal, height, and width positions.
 
+An image is not passed directly to the language layers. The processor resizes
+and normalizes it, divides it into spatial and temporal patches, and records the
+patch grid. The vision encoder turns patches into vectors; the merger reduces
+groups of patch vectors and projects them from width 1,152 to the text width
+5,120. Those vectors are spliced among ordinary token embeddings at positions
+defined by special boundary tokens.
+
 The official vision contract is 27 layers, width 1,152, 16 heads, FFN 4,304,
 patch 16, temporal patch 2, spatial merge 2, and projection to 5,120. The text
 RoPE uses three mRoPE sections `[11,11,10]`, interleaved into the 64 rotary
 dimensions. Image/video boundary IDs and processor ordering come from pinned
 processor files, never handwritten assumptions.
+
+Plain RoPE has one sequence coordinate. Multimodal RoPE supplies coordinates
+for time, height, and width so two image patches can differ spatially even when
+they are adjacent in the flattened sequence. The `[11,11,10]` sections describe
+how rotary frequency pairs are assigned among those axes; “interleaved” defines
+their ordering. The text core consumes the resulting cosines/sines and need not
+understand image geometry.
 
 ```mermaid
 flowchart LR

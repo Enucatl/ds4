@@ -41,12 +41,6 @@ dotting each input row with each output column:
 X[T,d] @ W[d,o] -> Y[T,o]
 ```
 
-```text
-FLOPs = 2*T*d*o
-BF16 weight bytes = 2*d*o
-latency >= max(FLOPs/peak_FLOPs, bytes/bandwidth, launch_floor)
-```
-
 The FLOP estimate counts one multiply and one add for each term in each dot
 product, hence the factor of two. It is a work estimate, not a stopwatch: GPU
 instructions for loads, scaling, activation functions, and quantization are
@@ -61,8 +55,7 @@ weight matrix once. A real kernel may read scales, write outputs, reread tiles,
 or keep some data in cache:
 
 ```text
-linear FLOPs = 3 * 2*T*5120*17408 = 534,773,760*T
-BF16 matrix storage = 267,386,880*2 bytes = 510 MiB/layer
+BF16 weight bytes = 2*d*o
 ```
 
 Qwen's feed-forward network (FFN) is a small subprogram inside every layer. It
@@ -78,6 +71,13 @@ h    = SiLU(gate) * up    # elementwise product, still [T,17408]
 y    = down_proj(h)       # [T,17408] -> [T,5120]
 ```
 
+The three linear projections therefore have:
+
+```text
+linear FLOPs = 3 * 2*T*5120*17408 = 534,773,760*T
+BF16 matrix storage = 3*5120*17408*2 bytes = 510 MiB/layer
+```
+
 For one decode row, the three matrix multiplications perform about 535 million
 multiply/add operations and the BF16 matrices occupy about 510 MiB. At `T=1`,
 the same 510 MiB may be read for one output row, so bandwidth and launch costs
@@ -91,6 +91,10 @@ The practical lower bound combines three possible limits. `peak_FLOPs` is the
 hardware's useful compute rate, `bandwidth` is the sustained rate for the memory
 being read, and `launch_floor` is the fixed cost of dispatching and coordinating
 a kernel. The slowest of these floors wins:
+
+```text
+latency >= max(FLOPs/peak_FLOPs, bytes/bandwidth, launch_floor)
+```
 
 Full attention needs a different kind of memory. At each full-attention layer,
 the model creates a **key** vector (K) and a **value** vector (V) for the token.

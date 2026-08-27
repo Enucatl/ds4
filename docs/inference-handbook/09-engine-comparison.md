@@ -16,6 +16,17 @@ compares them with two authorities, and records the first failing boundary.
 That makes a failed gate actionable and prevents a later speed result from
 concealing an earlier semantic error.
 
+The milestones form four larger phases:
+
+1. **Freeze semantics (1–3):** decide exactly which model is being implemented
+   and obtain a slow, observable result.
+2. **Reach the GPU (4–7):** implement operations first, then stateful mixers and
+   the complete scheduler, while retaining the scalar oracle.
+3. **Meet the product constraint (8–11):** reduce weight size, prove the memory
+   budget, optimize measured bottlenecks, and persist sessions.
+4. **Extend deliberately (12):** add optional state machines only after the text
+   core is stable.
+
 | # | Deliverable | Input -> output | Gate |
 |---:|---|---|---|
 | 1 | pinned fixture | prompt/messages -> IDs, positions, logits | hashes and expected logits recorded |
@@ -45,6 +56,29 @@ embeddings and positions; `SessionState` contains all mutable prefix state;
 `BackendOps` supplies reference or CUDA operations. Server and CLI code see
 tokens/logits/session operations, never tensor names. This conceptual boundary
 does not require changing DwarfStar's runtime API.
+
+One possible call flow is:
+
+```text
+spec = validate(config, manifest)
+weights = load_and_repack(spec, artifact)
+backend = make_cuda_backend(spec, weights)
+session = create_session(spec, context_capacity)
+input = SequenceInput(token_embeddings, positions)
+logits = backend.forward(weights, input, session.state)
+```
+
+The names are conceptual rather than a required public API. Their value is that
+the converter does not know about HTTP messages, the CUDA backend does not parse
+checkpoint names, and the server does not manipulate recurrent matrices. This
+keeps a bug within a testable boundary.
+
+### What “runnable” means
+
+A milestone artifact should have one documented command, fixed small inputs,
+machine-readable output, and a nonzero exit status on gate failure. A notebook
+or debugger observation is useful during development but is not the gate until
+another programmer can reproduce it without hidden state.
 
 ## DwarfStar lessons
 

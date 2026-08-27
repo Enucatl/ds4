@@ -28,6 +28,18 @@ For block format `(N values, B bytes)`, storage is
 derived layouts separately. Conversion must round-trip a sample block through a
 scalar dequantizer and compare each converted tensor's checksum.
 
+For example, imagine a format storing 32 values in 18 bytes: 16 bytes of packed
+codes plus a two-byte scale. A 1,000-element tensor needs `ceil(1000/32)=32`
+blocks, or 576 bytes before alignment—not `1000*4/8=500` bytes. If tensors begin
+on 256-byte boundaries, the next tensor may start later still. This is why the
+converter computes exact payload offsets rather than multiplying a marketing
+bit rate by the parameter count.
+
+A **transpose** changes logical axes: `[out,in]` becomes `[in,out]`. A repack
+may instead preserve the logical axes while arranging blocks, columns, or tiles
+in the order a CUDA kernel expects. The manifest must distinguish them so the
+reference loader can reconstruct the original logical tensor.
+
 ## Quantization policy
 
 Bring up BF16/FP16 weights with FP32 sensitive state first. A quantized block
@@ -41,6 +53,13 @@ head, and finally recurrence-sensitive GDN paths only if evidence permits.
 Keep norms, biases, `A_log`, `dt_bias`, and recurrent state high precision at v1.
 q27's published per-tensor recipes are useful external evidence that sensitivity
 is non-uniform, not proof that its choices transfer to this converter.
+
+**Calibration** runs representative text through the high-precision model and
+records which weights or channels see important activations. The converter can
+spend more precision where an error is amplified. GDN deserves special caution:
+a small recurrent-state error is fed into the next token and can accumulate over
+a long prompt, so a short local dot-product test does not establish long-context
+quality.
 
 ## Reproducible memory ledger
 
@@ -56,12 +75,24 @@ is non-uniform, not proof that its choices transfer to this converter.
 | CUDA libraries + graphs | allocation delta | measured |
 | fragmentation/reserve | explicit policy | never zero |
 
+“Resident weights” are the tensors kept on the GPU for the engine lifetime.
+“Repacked weights” are additional optimized copies; they count even if the
+original remains mapped. “Workspace” is reusable temporary memory sized for the
+largest live operation. CUDA libraries and graph instantiation may allocate
+memory outside the engine's own allocator. **Reserve** is intentionally unused
+headroom for transient allocations and fragmentation.
+
 The 4-bit arithmetic lower bound is `27e9*0.5 = 13.5 GB` decimal (12.6 GiB),
 not an artifact size or fit proof. The allocation log must show current, peak,
 and reserved bytes by owner and demonstrate headroom after graph instantiation.
 At native 256K, BF16 KV alone is 16 GiB, so a 32K fit does not prove native
 context fit. Larger context requires a measured lower-precision KV policy or a
 smaller weight/workspace plan and its own quality gate.
+
+GB and GiB differ: storage vendors often use `1 GB = 10^9` bytes, while
+`1 GiB = 2^30` bytes. The RTX 5090's advertised 32 GB memory is normally exposed
+to software in binary units close to 32 GiB, less whatever the driver and other
+processes reserve. Always budget from the runtime's reported free bytes.
 
 ## DwarfStar transfer boundary
 
