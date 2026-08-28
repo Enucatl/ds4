@@ -3,7 +3,9 @@
 This handbook has one outcome: help a systems programmer build a narrow,
 text-first inference engine for Qwen3.8-27B on a 32 GiB RTX 5090. It is a design
 and implementation guide, not Qwen support for DwarfStar and not a promise of a
-particular speed. DwarfStar is a worked systems case study.
+particular speed. That is the primary optimization target; the architecture also
+supports DGX Spark, Apple Silicon, and CPU-only hosts at lower support tiers.
+DwarfStar is a worked systems case study.
 
 ## Authority and evidence
 
@@ -20,7 +22,8 @@ DwarfStar or the engine proposed here.
 ## Two reading tracks
 
 The fundamentals track is Chapters 1, 3, 5, 6, 7, and 8. The implementation
-track is Chapters 2, 4, 9, and 10. Both end at Chapter 11.
+track is Chapters 2, 4, 9, and 10. Both use Chapter 11 for review and Chapter 12
+for language and host portability decisions.
 
 1. [Inference fundamentals](01-foundations.md): shapes, bytes, rooflines.
 2. [A complete DwarfStar request](02-execution-path.md): reusable mechanics and model-specific traps.
@@ -33,7 +36,8 @@ track is Chapters 2, 4, 9, and 10. Both end at Chapter 11.
 9. [Gated implementation roadmap](09-engine-comparison.md): twelve acceptance milestones.
 10. [Deferred MTP and vision](10-qwen-transfer.md): extensions without text-core redesign.
 11. [Glossary, worksheets, and exercises](11-glossary-worksheets.md).
-12. [Source and evidence ledger](sources.md).
+12. [Language and platform strategy](12-language-and-platforms.md): C++ boundaries and tiered backends.
+13. [Source and evidence ledger](sources.md).
 
 Claims use four labels: **Measured** (this exact artifact and hardware),
 **External** (a linked source), **Estimated** (reproducible arithmetic), and
@@ -45,7 +49,8 @@ Claims use four labels: **Measured** (this exact artifact and hardware),
 - `ModelWeights`: immutable resident or repacked tensors.
 - `SequenceInput`: token embeddings and position metadata; later visual embeddings.
 - `SessionState`: 48 recurrent matrices and convolution rings, 16 KV caches, position frontier, and optional MTP state.
-- `BackendOps`: reference and CUDA projection, norm, RoPE, GDN, attention, FFN, and logits operations.
+- `BackendOps`: coarse reference, CPU, CUDA, and Metal execution services, with
+  semantic primitive operations retained for differential tests.
 
 The text path is `template -> token IDs -> embeddings -> 64 hybrid layers ->
 final norm -> logits -> sampler`. Weights belong to the engine; prefix-dependent
@@ -56,4 +61,3 @@ data belongs to the session. V1 excludes vision and MTP.
 Each technical chapter covers motivation, concepts, worked shapes, a DwarfStar
 example, transfer boundaries, concrete work, failure modes, and a verification
 exercise with an expected result.
-

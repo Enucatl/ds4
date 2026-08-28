@@ -1,6 +1,6 @@
 # 11. Glossary, worksheets, and review
 
-[Previous](10-qwen-transfer.md) · [Index](README.md) · [Sources](sources.md)
+[Previous](10-qwen-transfer.md) · [Index](README.md) · [Next](12-language-and-platforms.md) · [Sources](sources.md)
 
 ## Glossary
 

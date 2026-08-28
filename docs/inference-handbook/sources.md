@@ -35,9 +35,22 @@ DSpark are explicitly rejected as Qwen model semantics.
   Its reported formats and measurements are **External** and apply only to its
   artifacts, revisions, harnesses, and hardware.
 - [RTX 5090 specifications](https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5090/),
+  [CUDA GPU compute capabilities](https://developer.nvidia.com/cuda-gpus),
   [Blackwell tuning guide](https://docs.nvidia.com/cuda/blackwell-tuning-guide/),
   and [CUDA release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/):
   **External**, version-sensitive hardware/toolchain facts.
+- [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/)
+  and [CUTLASS](https://github.com/NVIDIA/cutlass): **External primary** sources
+  for CUDA execution, memory, and kernel-building interfaces.
+- [DGX Spark product specifications](https://www.nvidia.com/en-us/products/workstations/dgx-spark/)
+  and [DGX Spark user guide](https://docs.nvidia.com/dgx/dgx-spark/): **External
+  primary** sources for its GB10 platform, ARM host, and 128 GB coherent unified
+  system memory. Exact toolchain and compute-target support remain
+  version-sensitive.
+- Apple's [Metal overview](https://developer.apple.com/metal/),
+  and [resource storage modes](https://developer.apple.com/documentation/metal/choosing-a-resource-storage-mode-for-apple-gpus):
+  **External primary** sources for Metal execution and Apple Silicon unified
+  memory behavior.
 
 ## Arithmetic and proposed claims
 
